@@ -1,243 +1,308 @@
-import React, { useState, useRef } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  TextInput, 
-  FlatList, 
-  ScrollView,
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
   Modal,
-  Platform,
-  Dimensions,
-  Pressable
+  TextInput,
+  Alert,
+  FlatList,
+  Switch
 } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
+import { Audio } from 'expo-av';
+import { Swipeable } from 'react-native-gesture-handler';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
 
-const SCREEN_HEIGHT = Dimensions.get('window').height;
-
-const WheelPicker = ({ data, selectedIndex, onChange }) => {
-  return (
-    <ScrollView
-      style={styles.wheelPicker}
-      showsVerticalScrollIndicator={false}
-      snapToInterval={50}
-      decelerationRate="fast"
-      onMomentumScrollEnd={(event) => {
-        const index = Math.round(event.nativeEvent.contentOffset.y / 50);
-        onChange(data[index]);
-      }}
-    >
-      {data.map((item, index) => (
-        <Pressable
-          key={item}
-          style={[
-            styles.wheelItem,
-            selectedIndex === index && styles.selectedWheelItem
-          ]}
-          onPress={() => onChange(item)}
-        >
-          <Text style={[
-            styles.wheelItemText,
-            selectedIndex === index && styles.selectedWheelItemText
-          ]}>
-            {item}
-          </Text>
-        </Pressable>
-      ))}
-    </ScrollView>
-  );
-};
-
-const NewAlarmScreen = () => {
-  const [alarmTime, setAlarmTime] = useState({ hours: '12', minutes: '00' });
-  const [showTimePicker, setShowTimePicker] = useState(false);
+const AlarmApp = () => {
+  const [modalVisible, setModalVisible] = useState(false);
   const [alarmTitle, setAlarmTitle] = useState('');
-  const [alarmDescription, setAlarmDescription] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [selectedLocation, setSelectedLocation] = useState({
-    latitude: 41.0082,
-    longitude: 28.9784,
-  });
-
+  const [selectedTime, setSelectedTime] = useState(new Date());
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [alarms, setAlarms] = useState([]);
+  const [currentLocation, setCurrentLocation] = useState(null);
+  const [selectedLocation, setSelectedLocation] = useState(null);
+  const [isTimeEnabled, setIsTimeEnabled] = useState(true);
+  const [initialRegion, setInitialRegion] = useState(null);
   const mapRef = useRef(null);
-  const scrollViewRef = useRef(null);
+  const soundRef = useRef(null);
 
-  // Picker için saat ve dakika seçenekleri oluştur
-  const hours = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0'));
-  const minutes = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
-
-  const handleLocationSelect = (event) => {
-    const { latitude, longitude } = event.nativeEvent.coordinate;
-    setSelectedLocation({ latitude, longitude });
-  };
-
-  const searchLocations = async (text) => {
-    setSearchQuery(text);
-    if (text.length > 2) {
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}`
-        );
-        const data = await response.json();
-        setSearchResults(data);
-      } catch (error) {
-        console.error('Arama hatası:', error);
+  useEffect(() => {
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Konum izni reddedildi', 'Konum özelliğini kullanabilmek için izin vermeniz gerekiyor.');
+        return;
       }
-    } else {
-      setSearchResults([]);
-    }
-  };
 
-  const handleSelectSearchResult = (item) => {
-    const newLocation = {
-      latitude: parseFloat(item.lat),
-      longitude: parseFloat(item.lon),
-    };
-    setSelectedLocation(newLocation);
-    setSearchResults([]);
-    setSearchQuery(item.display_name);
-    mapRef.current?.animateToRegion({
-      ...newLocation,
-      latitudeDelta: 0.01,
-      longitudeDelta: 0.01,
+      const location = await Location.getCurrentPositionAsync();
+      setCurrentLocation(location.coords);
+      setSelectedLocation(location.coords);
+      setInitialRegion({
+        ...location.coords,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      });
+
+      const locationSubscription = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 10 },
+        (newLocation) => {
+          setCurrentLocation(newLocation.coords);
+          checkAlarms(newLocation.coords);
+        }
+      );
+
+      return () => {
+        locationSubscription.remove();
+        if (soundRef.current) {
+          soundRef.current.unloadAsync();
+        }
+      };
+    })();
+  }, []);
+
+  const checkAlarms = (coords) => {
+    const now = new Date();
+    alarms.forEach(alarm => {
+      const distance = calculateDistance(
+        coords.latitude,
+        coords.longitude,
+        alarm.latitude,
+        alarm.longitude
+      );
+
+      let shouldTrigger = false;
+      
+      if (alarm.timeEnabled) {
+        const alarmTime = new Date(alarm.time);
+        shouldTrigger = now.getHours() === alarmTime.getHours() && 
+                       now.getMinutes() === alarmTime.getMinutes() &&
+                       distance < 100;
+      } else {
+        shouldTrigger = distance < 100;
+      }
+
+      if (shouldTrigger) {
+        playAlarm();
+        Alert.alert('Alarm!', `${alarm.name} konumuna ulaştınız!`);
+      }
     });
   };
 
-  const formatTime = () => {
-    return `${alarmTime.hours}:${alarmTime.minutes}`;
+  const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371;
+    const dLat = deg2rad(lat2 - lat1);
+    const dLon = deg2rad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c * 1000;
   };
 
-  const TimePickerModal = () => (
-    <Modal
-      animationType="slide"
-      transparent={true}
-      visible={showTimePicker}
-      onRequestClose={() => setShowTimePicker(false)}
+  const deg2rad = (deg) => deg * (Math.PI / 180);
+
+  const playAlarm = async () => {
+    try {
+      const { sound } = await Audio.Sound.createAsync(
+        require('./assets/alarm.mp3')
+      );
+      soundRef.current = sound;
+      await sound.playAsync();
+    } catch (error) {
+      console.log('Alarm çalma hatası:', error);
+    }
+  };
+
+  const addAlarm = () => {
+    if (alarmTitle.trim() === '') {
+      Alert.alert('Uyarı', 'Lütfen bir alarm başlığı girin.');
+      return;
+    }
+
+    const newAlarm = {
+      id: Math.random().toString(),
+      name: alarmTitle,
+      time: selectedTime.toISOString(),
+      timeEnabled: isTimeEnabled,
+      latitude: selectedLocation.latitude,
+      longitude: selectedLocation.longitude,
+    };
+
+    setAlarms([...alarms, newAlarm]);
+    setModalVisible(false);
+    setAlarmTitle('');
+    setSelectedTime(new Date());
+    setIsTimeEnabled(true);
+  };
+
+  const deleteAlarm = (alarmId) => {
+    setAlarms(alarms.filter(alarm => alarm.id !== alarmId));
+  };
+
+  const centerToUserLocation = async () => {
+    if (!currentLocation) return;
+    
+    mapRef.current.animateToRegion({
+      ...currentLocation,
+      latitudeDelta: 0.01,
+      longitudeDelta: 0.01,
+    }, 1000);
+  };
+
+  const renderRightActions = (progress, dragX, alarmId) => (
+    <TouchableOpacity
+      style={styles.deleteButton}
+      onPress={() => deleteAlarm(alarmId)}
     >
-      <View style={styles.modalContainer}>
-        <View style={styles.pickerContainer}>
-          <View style={styles.pickerHeader}>
-            <TouchableOpacity 
-              onPress={() => setShowTimePicker(false)}
-              style={styles.pickerHeaderButton}
-            >
-              <Text style={styles.cancelText}>İptal</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              onPress={() => setShowTimePicker(false)}
-              style={styles.pickerHeaderButton}
-            >
-              <Text style={styles.doneText}>Tamam</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.pickerWrapper}>
-            <WheelPicker
-              data={hours}
-              selectedIndex={parseInt(alarmTime.hours)}
-              onChange={(value) => setAlarmTime(prev => ({ ...prev, hours: value }))}
-            />
-            <Text style={styles.pickerSeparator}>:</Text>
-            <WheelPicker
-              data={minutes}
-              selectedIndex={parseInt(alarmTime.minutes)}
-              onChange={(value) => setAlarmTime(prev => ({ ...prev, minutes: value }))}
-            />
-          </View>
-        </View>
+      <Text style={styles.deleteButtonText}>Sil</Text>
+    </TouchableOpacity>
+  );
+
+  const renderAlarmItem = ({ item }) => (
+    <Swipeable
+      renderRightActions={(progress, dragX) => 
+        renderRightActions(progress, dragX, item.id)
+      }
+    >
+      <View style={styles.alarmItem}>
+        <Text style={styles.alarmTitle}>{item.name}</Text>
+        <Text style={styles.alarmDetails}>
+          {item.timeEnabled ? 
+            new Date(item.time).toLocaleTimeString('tr-TR', {
+              hour: '2-digit',
+              minute: '2-digit'
+            }) : 'Sürekli Alarm'
+          }
+        </Text>
+        <Text style={styles.alarmDetails}>
+          Konum: {item.latitude.toFixed(4)}, {item.longitude.toFixed(4)}
+        </Text>
       </View>
-    </Modal>
+    </Swipeable>
   );
 
   return (
     <View style={styles.container}>
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Konum Ara..."
-          value={searchQuery}
-          onChangeText={searchLocations}
-        />
-        {searchResults.length > 0 && (
-          <FlatList
-            style={styles.searchResults}
-            data={searchResults}
-            keyExtractor={(item) => item.place_id.toString()}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.resultItem}
-                onPress={() => handleSelectSearchResult(item)}
-              >
-                <Text numberOfLines={2}>{item.display_name}</Text>
-              </TouchableOpacity>
-            )}
-          />
-        )}
-      </View>
-
-      <ScrollView
-        ref={scrollViewRef}
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollViewContent}
-        showsVerticalScrollIndicator={false}
-        bounces={true}
-      >
+      {initialRegion && (
         <MapView
           ref={mapRef}
           style={styles.map}
-          initialRegion={{
-            latitude: selectedLocation.latitude,
-            longitude: selectedLocation.longitude,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-          onPress={handleLocationSelect}
+          initialRegion={initialRegion}
+          onPress={(e) => setSelectedLocation(e.nativeEvent.coordinate)}
         >
-          <Marker coordinate={selectedLocation} />
+          {selectedLocation && <Marker coordinate={selectedLocation} />}
+          {currentLocation && (
+            <Marker coordinate={currentLocation} pinColor="blue" />
+          )}
         </MapView>
+      )}
 
-        <View style={styles.formContainer}>
-          <Text style={styles.label}>Alarm Başlığı</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Alarm Başlığı Girin"
-            value={alarmTitle}
-            onChangeText={setAlarmTitle}
-          />
+      <TouchableOpacity 
+        style={styles.locateButton}
+        onPress={centerToUserLocation}
+      >
+        <Ionicons name="locate" size={24} color="white" />
+      </TouchableOpacity>
 
-          <Text style={styles.label}>Açıklama</Text>
-          <TextInput
-            style={[styles.input, styles.textArea]}
-            placeholder="Alarm için açıklama girin"
-            value={alarmDescription}
-            onChangeText={setAlarmDescription}
-            multiline={true}
-            numberOfLines={3}
-            textAlignVertical="top"
-          />
+      <View style={styles.contentContainer}>
+        <TouchableOpacity
+          style={styles.addButton}
+          onPress={() => setModalVisible(true)}
+        >
+          <Text style={styles.addButtonText}>Alarm Ekle</Text>
+        </TouchableOpacity>
 
-          <Text style={styles.label}>Alarm Saati</Text>
-          <TouchableOpacity 
-            style={styles.timePickerButton}
-            onPress={() => setShowTimePicker(true)}
-          >
-            <Text style={styles.timeIcon}>🕒</Text>
-            <Text style={styles.timePickerButtonText}>{formatTime()}</Text>
-          </TouchableOpacity>
+        <FlatList
+          data={alarms}
+          keyExtractor={(item) => item.id}
+          renderItem={renderAlarmItem}
+          style={styles.alarmList}
+        />
+      </View>
 
-          <Text style={styles.label}>Seçilen Konum</Text>
-          <Text style={styles.locationText}>
-            {`Lat: ${selectedLocation.latitude.toFixed(4)}, Lng: ${selectedLocation.longitude.toFixed(4)}`}
-          </Text>
+      <Modal
+        visible={modalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Yeni Alarm</Text>
 
-          <TouchableOpacity style={styles.saveButton}>
-            <Text style={styles.saveButtonText}>Kaydet</Text>
-          </TouchableOpacity>
+            <View style={styles.switchContainer}>
+              <Text style={styles.inputLabel}>Zamanlı Alarm</Text>
+              <Switch
+                value={isTimeEnabled}
+                onValueChange={setIsTimeEnabled}
+              />
+            </View>
+
+            <View style={styles.inputContainer}>
+              <Text style={styles.inputLabel}>Alarm Adı</Text>
+              <TextInput
+                style={styles.input}
+                value={alarmTitle}
+                onChangeText={setAlarmTitle}
+                placeholder="Alarm adını girin"
+              />
+            </View>
+
+            {isTimeEnabled && (
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>Alarm Saati</Text>
+                <TouchableOpacity
+                  style={styles.timeButton}
+                  onPress={() => setShowTimePicker(true)}
+                >
+                  <Text style={styles.timeButtonText}>
+                    {selectedTime.toLocaleTimeString('tr-TR', {
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <View style={styles.buttonContainer}>
+              <TouchableOpacity
+                style={[styles.button, styles.saveButton]}
+                onPress={addAlarm}
+              >
+                <Text style={styles.buttonText}>Kaydet</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.button, styles.cancelButton]}
+                onPress={() => setModalVisible(false)}
+              >
+                <Text style={[styles.buttonText, styles.cancelButtonText]}>
+                  İptal
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-      </ScrollView>
+      </Modal>
 
-      <TimePickerModal />
+      {showTimePicker && (
+        <DateTimePicker
+          value={selectedTime}
+          mode="time"
+          is24Hour={true}
+          display="default"
+          onChange={(event, date) => {
+            setShowTimePicker(false);
+            if (date) setSelectedTime(date);
+          }}
+        />
+      )}
     </View>
   );
 };
@@ -245,200 +310,146 @@ const NewAlarmScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollViewContent: {
-    padding: 10,
-    paddingTop: 70,
-    
-  },
-  searchContainer: {
-    position: 'absolute',
-    width: '100%',
-    zIndex: 1,
-    padding: 10,
-    backgroundColor: '#fff',
-  },
-  searchInput: {
-    height: 50,
-    borderColor: '#ddd',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    fontSize: 16,
-    backgroundColor: '#fff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
-  },
-  searchResults: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    marginTop: 5,
-    maxHeight: 200,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-  },
-  resultItem: {
-    padding: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
   },
   map: {
-    height: 300,
-    borderRadius: 15,
-    marginBottom: 20,
+    flex: 1,
   },
-  formContainer: {
-    backgroundColor: '#f7f7f7',
-    borderRadius: 15,
-    padding: 20,
+  locateButton: {
+    position: 'absolute',
+    right: 20,
+    top: 60,
+    backgroundColor: '#007AFF',
+    padding: 12,
+    borderRadius: 30,
     elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
   },
-  label: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 10,
-    color: '#333',
-  },
-  input: {
-    height: 50,
-    borderColor: '#ddd',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    fontSize: 16,
-    backgroundColor: '#fff',
-    marginBottom: 15,
-    shadowColor: '#ccc',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
-  },
-  textArea: {
-    height: 100,
-    paddingTop: 12,
-    paddingBottom: 12,
-    textAlignVertical: 'top',
-  },
-  timePickerButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    height: 50,
-    borderColor: '#ddd',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    backgroundColor: '#fff',
-    marginBottom: 15,
-    shadowColor: '#ccc',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
-  },
-  timePickerButtonText: {
-    flex: 1,
-    fontSize: 18,
-    color: '#333',
-  },
-  timeIcon: {
-    fontSize: 22,
-    color: '#6200EE',
-    marginRight: 10,
-  },
-  locationText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 20,
-  },
-  saveButton: {
-    backgroundColor: '#4CAF50',
-    borderRadius: 12,
-    paddingVertical: 15,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 20,
-  },
-  saveButtonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  modalContainer: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  pickerContainer: {
-    backgroundColor: '#fff',
+  contentContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'white',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    paddingBottom: Platform.OS === 'ios' ? 30 : 0,
+    padding: 20,
+    maxHeight: '50%',
   },
-  pickerHeader: {
+  addButton: {
+    backgroundColor: '#007AFF',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  addButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  alarmList: {
+    marginTop: 10,
+  },
+  alarmItem: {
+    backgroundColor: '#f8f9fa',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  alarmTitle: {
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  alarmDetails: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 5,
+  },
+  deleteButton: {
+    backgroundColor: '#ff4444',
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 80,
+    height: '100%',
+    borderRadius: 10,
+  },
+  deleteButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderRadius: 20,
+    padding: 20,
+    width: '90%',
+    maxWidth: 400,
+  },
+  modalTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  switchContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 20,
+  },
+  inputContainer: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontSize: 16,
+    marginBottom: 8,
+    color: '#333',
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 16,
+  },
+  timeButton: {
+    backgroundColor: '#f8f9fa',
+    padding: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  timeButtonText: {
+    fontSize: 16,
+    color: '#333',
+  },
+  buttonContainer: {
+    flexDirection: 'column',
+    gap: 10,
+    marginTop: 20,
+  },
+  button: {
     padding: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  pickerHeaderButton: {
-    padding: 10,
-  },
-  cancelText: {
-    color: '#666',
-    fontSize: 16,
-  },
-  doneText: {
-    color: '#6200EE',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  pickerWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 200,
-  },
-  wheelPicker: {
-    width: 80,
-    height: 200,
-  },
-  wheelItem: {
-    height: 50,
-    justifyContent: 'center',
+    borderRadius: 10,
     alignItems: 'center',
   },
-  selectedWheelItem: {
-    backgroundColor: 'rgba(98, 0, 238, 0.1)',
+  saveButton: {
+    backgroundColor: '#007AFF',
   },
-  wheelItemText: {
-    fontSize: 20,
-    color: '#666',
+  cancelButton: {
+    backgroundColor: '#f8f9fa',
   },
-  selectedWheelItemText: {
-    color: '#6200EE',
-    fontWeight: '600',
+  buttonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
-  pickerSeparator: {
-    fontSize: 24,
-    fontWeight: '600',
-    marginHorizontal: 10,
+  cancelButtonText: {
+    color: '#333',
   },
 });
 
-export default NewAlarmScreen;
+export default AlarmApp;

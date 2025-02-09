@@ -6,7 +6,6 @@ import SettingsScreen from './screens/SettingsScreen';
 import NewAlarmScreen from './screens/NewAlarmScreen';
 
 const Stack = createStackNavigator();
-
 const App = () => {
   return (
     <NavigationContainer>
