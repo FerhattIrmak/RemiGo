@@ -1,4 +1,5 @@
-
+                                            🎯 Konum Bazlı Hatırlatıcı ve Alarm Uygulaması🎯
+Remigo, kullanıcıların belirli bir konuma yaklaştıklarında hatırlatma almasını sağlayan yenilikçi bir uygulamadır. Amacınız, örneğin bir kırtasiyenin önünden geçerken size alışveriş listenizi hatırlatmaksa, Remigo bunu sizin için yapar. Zaman ekleme zorunluluğu olmadan, sadece konuma bağlı hatırlatma oluşturabilirsiniz.
 
 
 
