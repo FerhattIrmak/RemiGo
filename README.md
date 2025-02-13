@@ -4,6 +4,7 @@ Remigo, kullanıcıların belirli bir konuma yaklaştıklarında hatırlatma alm
 Kullanılan Teknolojiler ve Kütüphaneler
 
 Temel Teknolojiler
+
 *React Native: Mobil uygulama geliştirmek için kullanılan framework.
 
 *React Navigation: Uygulama içinde ekranlar arası gezinme sağlamak için kullanılan navigasyon kütüphanesi.
