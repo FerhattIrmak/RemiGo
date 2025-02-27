@@ -9,7 +9,8 @@ import {
   Alert,
   FlatList,
   Switch,
-  ActivityIndicator
+  ActivityIndicator,
+  Platform
 } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -17,6 +18,9 @@ import { Audio } from 'expo-av';
 import { Swipeable } from 'react-native-gesture-handler';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const ALARMS_STORAGE_KEY = '@location_alarms';
 
 const AlarmApp = () => {
   const [modalVisible, setModalVisible] = useState(false);
@@ -33,8 +37,42 @@ const AlarmApp = () => {
   const [proximityRadius, setProximityRadius] = useState(100); // Metre cinsinden
   const [editMode, setEditMode] = useState(false);
   const [editAlarmId, setEditAlarmId] = useState(null);
+  const [androidTimePickerMode, setAndroidTimePickerMode] = useState(false);
   const mapRef = useRef(null);
   const soundRef = useRef(null);
+
+  // AsyncStorage'dan alarmları yükleme
+  useEffect(() => {
+    const loadAlarms = async () => {
+      try {
+        const savedAlarms = await AsyncStorage.getItem(ALARMS_STORAGE_KEY);
+        if (savedAlarms !== null) {
+          setAlarms(JSON.parse(savedAlarms));
+        }
+      } catch (error) {
+        console.error('Alarmlar yüklenirken hata oluştu:', error);
+        Alert.alert('Hata', 'Kaydedilmiş alarmlar yüklenemedi.');
+      }
+    };
+
+    loadAlarms();
+  }, []);
+
+  // Alarmları AsyncStorage'a kaydetme
+  useEffect(() => {
+    const saveAlarms = async () => {
+      try {
+        await AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(alarms));
+      } catch (error) {
+        console.error('Alarmlar kaydedilirken hata oluştu:', error);
+        Alert.alert('Hata', 'Alarmlar cihaza kaydedilemedi.');
+      }
+    };
+
+    if (alarms.length > 0) {
+      saveAlarms();
+    }
+  }, [alarms]);
 
   useEffect(() => {
     (async () => {
@@ -82,13 +120,6 @@ const AlarmApp = () => {
       }
     })();
   }, []);
-
-  // Alarmlarda değişiklik olduğunda localStorage'a kaydetme (gerçek uygulamada)
-  useEffect(() => {
-    // Gerçek uygulamada localStorage veya AsyncStorage kullanılarak
-    // alarmlar cihaza kaydedilecek
-    console.log('Alarmlar güncellendi:', alarms);
-  }, [alarms]);
 
   const checkAlarms = (coords) => {
     const now = new Date();
@@ -283,6 +314,27 @@ const AlarmApp = () => {
     }, 1000);
   };
 
+  const handleTimePickerShow = () => {
+    if (Platform.OS === 'android') {
+      setAndroidTimePickerMode(true);
+    } else {
+      // iOS için
+      setShowTimePicker(true);
+    }
+  };
+
+  const handleTimeChange = (event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      setAndroidTimePickerMode(false);
+    } else {
+      setShowTimePicker(false);
+    }
+    
+    if (selectedDate) {
+      setSelectedTime(selectedDate);
+    }
+  };
+
   const renderRightActions = (progress, dragX, alarm) => (
     <View style={styles.actionButtons}>
       <TouchableOpacity
@@ -357,6 +409,18 @@ const AlarmApp = () => {
       </TouchableOpacity>
     </Swipeable>
   );
+
+  // Alarmları temizleme fonksiyonu (geliştirici için)
+  const clearAllAlarms = async () => {
+    try {
+      await AsyncStorage.removeItem(ALARMS_STORAGE_KEY);
+      setAlarms([]);
+      Alert.alert('Başarılı', 'Tüm alarmlar silindi.');
+    } catch (error) {
+      console.error('Alarmlar silinirken hata oluştu:', error);
+      Alert.alert('Hata', 'Alarmlar silinemedi.');
+    }
+  };
 
   if (loading) {
     return (
@@ -494,7 +558,7 @@ const AlarmApp = () => {
                 <Text style={styles.inputLabel}>Alarm Saati</Text>
                 <TouchableOpacity
                   style={styles.timeButton}
-                  onPress={() => setShowTimePicker(true)}
+                  onPress={handleTimePickerShow}
                 >
                   <Text style={styles.timeButtonText}>
                     {selectedTime.toLocaleTimeString('tr-TR', {
@@ -557,16 +621,25 @@ const AlarmApp = () => {
         </View>
       </Modal>
 
-      {showTimePicker && (
+      {/* iOS için saat seçici */}
+      {Platform.OS === 'ios' && showTimePicker && (
         <DateTimePicker
           value={selectedTime}
           mode="time"
           is24Hour={true}
-          display="default"
-          onChange={(event, date) => {
-            setShowTimePicker(false);
-            if (date) setSelectedTime(date);
-          }}
+          display="spinner"
+          onChange={handleTimeChange}
+        />
+      )}
+
+      {/* Android için saat seçici */}
+      {Platform.OS === 'android' && androidTimePickerMode && (
+        <DateTimePicker
+          value={selectedTime}
+          mode="time"
+          is24Hour={true}
+          display="default" 
+          onChange={handleTimeChange}
         />
       )}
     </View>
