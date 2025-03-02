@@ -41,7 +41,7 @@ const HomeScreen = ({ navigation }: any) => {
   return (
     <Provider>
       <LinearGradient
-        colors={['#6366f1', '#8b5cf6', '#d946ef']}
+        colors={['#3b82f6', '#8b5cf6', '#d946ef']}
         style={styles.container}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
@@ -51,8 +51,9 @@ const HomeScreen = ({ navigation }: any) => {
           duration={1000}
           style={styles.header}
         >
+          <Text style={styles.headerTitle}>Konum Alarmı</Text>
           <Button
-            icon="settings"
+            icon="cog"
             onPress={() => navigation.navigate('Settings')}
             textColor="#fff"
             style={styles.settingsButton}
@@ -73,6 +74,12 @@ const HomeScreen = ({ navigation }: any) => {
           >
             <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
               <Card style={styles.card}>
+                <LinearGradient
+                  colors={['#8b5cf6', '#6366f1']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.cardGradientBar}
+                />
                 <Card.Title
                   title="Aktif Alarm Durumu"
                   titleStyle={styles.cardTitle}
@@ -91,6 +98,12 @@ const HomeScreen = ({ navigation }: any) => {
                   <Text style={styles.alarmText}>
                     Alarmınız şu anda aktif. Konumunuza göre alarm çalacak.
                   </Text>
+                  <View style={styles.statusChipContainer}>
+                    <View style={styles.statusChip}>
+                      <MaterialIcons name="location-on" size={16} color="#fff" />
+                      <Text style={styles.statusChipText}>Konum Takibi Açık</Text>
+                    </View>
+                  </View>
                 </Card.Content>
               </Card>
             </Animated.View>
@@ -169,16 +182,23 @@ const HomeScreen = ({ navigation }: any) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
   },
   header: {
-    marginTop: Platform.OS === 'ios' ? 40 : 20,
-    alignSelf: 'flex-end',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'ios' ? 50 : 30,
+    paddingBottom: 15,
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
   },
   settingsButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     borderRadius: 20,
-    paddingVertical: 5,
   },
   content: {
     flex: 1,
@@ -188,7 +208,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   card: {
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
     borderRadius: 20,
     padding: 15,
     marginBottom: 30,
@@ -197,24 +217,53 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 20,
     elevation: 10,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  cardGradientBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 6,
   },
   cardTitle: {
     color: '#1e293b',
     fontSize: 20,
     fontWeight: '700',
+    marginLeft: 8,
   },
   cardSubtitle: {
     color: '#64748b',
     fontSize: 14,
+    marginLeft: 8,
   },
   alarmText: {
     fontSize: 16,
     color: '#475569',
     marginTop: 10,
+    marginBottom: 16,
     lineHeight: 24,
   },
+  statusChipContainer: {
+    flexDirection: 'row',
+  },
+  statusChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  statusChipText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
   button: {
-    backgroundColor: '#fff',
+    backgroundColor: '#8b5cf6',
     borderRadius: 15,
     paddingVertical: 8,
     shadowColor: '#6366f1',
@@ -224,12 +273,12 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   buttonLabel: {
-    color: '#6366f1',
+    color: '#fff',
     fontSize: 16,
     fontWeight: '600',
   },
   buttonContent: {
-    height: 48,
+    height: 54,
   },
   modal: {
     marginHorizontal: 30,
