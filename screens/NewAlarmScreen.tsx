@@ -10,10 +10,14 @@ import {
   FlatList,
   Switch,
   ActivityIndicator,
-  Platform
+  Platform,
+  Keyboard,
+  Animated,
 } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
 import { Audio } from 'expo-av';
 import { Swipeable } from 'react-native-gesture-handler';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -21,876 +25,782 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const ALARMS_STORAGE_KEY = '@location_alarms';
+const BACKGROUND_LOCATION_TASK = 'background-location-task';
+const ALARM_SOUNDS = [
+  { label: 'flex', value: 'flex.mp3' },
+  { label: 'cosmic', value: 'cosmic.mp3' },
+  { label: 'summer', value: 'summer.mp3' },
+  { label: 'summertime', value: 'summertime.mp3' },
+  { label: 'ringtone', value: 'ringtone.mp3' },
+  { label: 'attack', value: 'attack.mp3' },
+  { label: 'biohazard', value: 'biohazard.mp3' },
+];
 
-const AlarmApp = () => {
+// Bildirim ayarları
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// Arka planda konum izleme görevi
+TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
+  if (error) {
+    console.error('Background task error:', error);
+    return;
+  }
+  if (data) {
+    const { locations } = data;
+    const coords = locations[0].coords;
+    const alarms = JSON.parse(await AsyncStorage.getItem(ALARMS_STORAGE_KEY)) || [];
+
+    for (const alarm of alarms) {
+      if (!alarm.active) continue;
+      const distance = getDistance(coords.latitude, coords.longitude, alarm.latitude, alarm.longitude);
+      if (distance < alarm.radius) {
+        const now = new Date();
+        if (!alarm.timeBased || Math.abs(now - new Date(alarm.time)) < 60000) {
+          await triggerAlarm(alarm, false);
+          break;
+        }
+      }
+    }
+  }
+});
+
+const getDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+            Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+const triggerAlarm = async (alarm, showAlert = true) => {
+  const soundFiles = {
+    'flex.mp3': require('../assets/flex.mp3'),
+    'biohazard.mp3': require('../assets/biohazard.mp3'),
+    'ringtone.mp3': require('../assets/ringtone.mp3'),
+    'attack.mp3': require('../assets/attack.mp3'),
+    'summertime.mp3': require('../assets/summertime.mp3'),
+    'cosmic.mp3': require('../assets/cosmic.mp3'),
+    'summer.mp3': require('../assets/summer.mp3'),
+  };
+
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    staysActiveInBackground: true,
+    playsInSilentModeIOS: true,
+    shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
+  });
+
+  let soundObject;
+  try {
+    const { sound } = await Audio.Sound.createAsync(soundFiles[alarm.sound], { shouldPlay: true });
+    soundObject = sound;
+    await sound.playAsync();
+  } catch (error) {
+    console.error('Error playing alarm sound:', error);
+  }
+
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'Alarm Triggered!',
+      body: `${alarm.name} - You’ve entered the location!`,
+      sound: 'default',
+    },
+    trigger: null,
+  });
+
+  const deactivateAlarm = async () => {
+    const alarms = JSON.parse(await AsyncStorage.getItem(ALARMS_STORAGE_KEY)) || [];
+    const updatedAlarms = alarms.map(a => a.id === alarm.id ? { ...a, active: false } : a);
+    await AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(updatedAlarms));
+    return updatedAlarms;
+  };
+
+  const updatedAlarms = await deactivateAlarm();
+  
+  if (showAlert) {
+    Alert.alert(
+      'Alarm Triggered!',
+      `${alarm.name}\n\nThis alarm has been triggered and deactivated!`,
+      [{
+        text: 'Tamam',
+        onPress: async () => {
+          if (soundObject) {
+            await soundObject.stopAsync();
+            await soundObject.unloadAsync();
+          }
+          const setAlarms = global.setAlarmsFunction;
+          if (setAlarms) setAlarms(updatedAlarms);
+        },
+      }],
+      { cancelable: false }
+    );
+  } else if (soundObject) {
+    setTimeout(async () => {
+      await soundObject.stopAsync();
+      await soundObject.unloadAsync();
+    }, 30000);
+  }
+
+  return updatedAlarms;
+};
+
+const LocationAlarm = ({ navigation, route }) => {
   const [modalVisible, setModalVisible] = useState(false);
   const [alarmTitle, setAlarmTitle] = useState('');
   const [selectedTime, setSelectedTime] = useState(new Date());
   const [showTimePicker, setShowTimePicker] = useState(false);
-  const [alarms, setAlarms] = useState([]);
-  const [activeAlarms, setActiveAlarms] = useState([]);
+  const [tempTime, setTempTime] = useState(new Date());
+  const [alarms, setAlarms] = useState(route.params?.alarms || []);
   const [currentLocation, setCurrentLocation] = useState(null);
   const [selectedLocation, setSelectedLocation] = useState(null);
-  const [isTimeEnabled, setIsTimeEnabled] = useState(true);
+  const [isTimeBased, setIsTimeBased] = useState(false);
   const [initialRegion, setInitialRegion] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [proximityRadius, setProximityRadius] = useState(100); // Metre cinsinden
-  const [editMode, setEditMode] = useState(false);
-  const [editAlarmId, setEditAlarmId] = useState(null);
-  const [androidTimePickerMode, setAndroidTimePickerMode] = useState(false);
+  const [radius, setRadius] = useState(100);
+  const [editAlarm, setEditAlarm] = useState(null);
+  const [selectedSound, setSelectedSound] = useState('flex.mp3');
+  const [playingSound, setPlayingSound] = useState(null);
   const mapRef = useRef(null);
-  const soundRef = useRef(null);
+  const modalOffset = useRef(new Animated.Value(0)).current;
 
-  // AsyncStorage'dan alarmları yükleme
+  useEffect(() => {
+    global.setAlarmsFunction = setAlarms;
+    return () => {
+      global.setAlarmsFunction = null;
+    };
+  }, [setAlarms]);
+
+  useEffect(() => {
+    const keyboardDidShowListener = Keyboard.addListener('keyboardDidShow', (e) => {
+      if (Platform.OS === 'ios') {
+        Animated.timing(modalOffset, {
+          toValue: -e.endCoordinates.height / 2,
+          duration: 300,
+          useNativeDriver: true,
+        }).start();
+      }
+    });
+    const keyboardDidHideListener = Keyboard.addListener('keyboardDidHide', () => {
+      if (Platform.OS === 'ios') {
+        Animated.timing(modalOffset, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }).start();
+      }
+    });
+
+    return () => {
+      keyboardDidShowListener.remove();
+      keyboardDidHideListener.remove();
+    };
+  }, [modalOffset]);
+
   useEffect(() => {
     const loadAlarms = async () => {
       try {
         const savedAlarms = await AsyncStorage.getItem(ALARMS_STORAGE_KEY);
-        if (savedAlarms !== null) {
-          setAlarms(JSON.parse(savedAlarms));
+        if (savedAlarms) {
+          const parsedAlarms = JSON.parse(savedAlarms);
+          setAlarms(parsedAlarms);
+          navigation.setParams({ alarms: parsedAlarms });
         }
       } catch (error) {
-        console.error('Alarmlar yüklenirken hata oluştu:', error);
-        Alert.alert('Hata', 'Kaydedilmiş alarmlar yüklenemedi.');
+        console.error('Error loading alarms:', error);
       }
     };
-
     loadAlarms();
-  }, []);
+  }, [navigation]);
 
-  // Alarmları AsyncStorage'a kaydetme
   useEffect(() => {
-    const saveAlarms = async () => {
-      try {
-        await AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(alarms));
-      } catch (error) {
-        console.error('Alarmlar kaydedilirken hata oluştu:', error);
-        Alert.alert('Hata', 'Alarmlar cihaza kaydedilemedi.');
-      }
-    };
-
-    if (alarms.length > 0) {
-      saveAlarms();
+    if (route.params?.alarms) {
+      setAlarms(route.params.alarms);
     }
-  }, [alarms]);
+  }, [route.params?.alarms]);
+
+  useEffect(() => {
+    if (alarms.length >= 0) {
+      AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(alarms));
+      navigation.setParams({ alarms });
+    }
+  }, [alarms, navigation]);
 
   useEffect(() => {
     (async () => {
-      try {
-        setLoading(true);
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert('Konum izni reddedildi', 'Konum özelliğini kullanabilmek için izin vermeniz gerekiyor.');
-          setLoading(false);
-          return;
-        }
+      setLoading(true);
 
-        const location = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Highest
-        });
-        
-        setCurrentLocation(location.coords);
-        setSelectedLocation(location.coords);
-        setInitialRegion({
-          ...location.coords,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        });
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
 
-        const locationSubscription = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 5000 },
-          (newLocation) => {
-            setCurrentLocation(newLocation.coords);
-            checkAlarms(newLocation.coords);
-          }
-        );
-
+      const foregroundStatus = await Location.requestForegroundPermissionsAsync();
+      if (foregroundStatus.status !== 'granted') {
+        Alert.alert('Permission Denied', 'Foreground location access is required.');
         setLoading(false);
-
-        return () => {
-          locationSubscription.remove();
-          if (soundRef.current) {
-            soundRef.current.unloadAsync();
-          }
-        };
-      } catch (error) {
-        console.error('Konum alma hatası:', error);
-        Alert.alert('Hata', 'Konum bilgisi alınamadı.');
-        setLoading(false);
+        return;
       }
+
+      const backgroundStatus = await Location.requestBackgroundPermissionsAsync();
+      if (backgroundStatus.status !== 'granted') {
+        Alert.alert('Permission Denied', 'Background location access is required.');
+        setLoading(false);
+        return;
+      }
+
+      const { status: notificationStatus } = await Notifications.requestPermissionsAsync();
+      if (notificationStatus !== 'granted') {
+        Alert.alert('Permission Denied', 'Notification access is required.');
+        setLoading(false);
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      setCurrentLocation(location.coords);
+      setInitialRegion({ ...location.coords, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+
+      const foregroundSubscription = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 10 },
+        (newLocation) => {
+          setCurrentLocation(newLocation.coords);
+          checkProximity(newLocation.coords);
+        }
+      );
+
+      await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
+        accuracy: Location.Accuracy.High,
+        distanceInterval: 10,
+        foregroundService: {
+          notificationTitle: 'RemiGo Running',
+          notificationBody: 'Tracking your location for alarms.',
+        },
+        showsBackgroundLocationIndicator: true,
+      });
+
+      setLoading(false);
+
+      return () => {
+        foregroundSubscription.remove();
+        Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+      };
     })();
   }, []);
 
-  const checkAlarms = (coords) => {
+  const checkProximity = async (coords) => {
     const now = new Date();
-    const triggeredAlarms = [];
-    
-    alarms.forEach(alarm => {
-      const distance = calculateDistance(
-        coords.latitude,
-        coords.longitude,
-        alarm.latitude,
-        alarm.longitude
-      );
-
-      let shouldTrigger = false;
-      
-      if (alarm.timeEnabled) {
-        const alarmTime = new Date(alarm.time);
-        const timeDifference = Math.abs(
-          now.getHours() * 60 + now.getMinutes() - 
-          (alarmTime.getHours() * 60 + alarmTime.getMinutes())
-        );
-        
-        // Zaman yakınsa (1 dakika içinde) ve belirtilen mesafe içindeyse
-        shouldTrigger = timeDifference <= 1 && distance < alarm.radius;
-      } else {
-        // Sadece konum tabanlı alarm - mesafe içindeyse
-        shouldTrigger = distance < alarm.radius;
+    for (const alarm of alarms) {
+      if (!alarm.active) continue;
+      const distance = getDistance(coords.latitude, coords.longitude, alarm.latitude, alarm.longitude);
+      if (distance < alarm.radius) {
+        if (!alarm.timeBased || Math.abs(now - new Date(alarm.time)) < 60000) {
+          const updatedAlarms = await triggerAlarm(alarm, true);
+          setAlarms(updatedAlarms);
+          navigation.setParams({ alarms: updatedAlarms });
+          break;
+        }
       }
-
-      if (shouldTrigger && !activeAlarms.includes(alarm.id)) {
-        triggeredAlarms.push(alarm.id);
-        playAlarm();
-        Alert.alert(
-          'Alarm!', 
-          `${alarm.name} konumuna ulaştınız!`,
-          [
-            {
-              text: 'Tamam',
-              onPress: () => {
-                stopAlarm();
-                // Tek seferlik alarmsa sil
-                if (alarm.oneTime) {
-                  deleteAlarm(alarm.id);
-                }
-              }
-            }
-          ]
-        );
-      } else if (distance >= alarm.radius && activeAlarms.includes(alarm.id)) {
-        // Artık mesafe dışındaysa aktif alarmlardan çıkar
-        setActiveAlarms(prev => prev.filter(id => id !== alarm.id));
-      }
-    });
-
-    if (triggeredAlarms.length > 0) {
-      setActiveAlarms(prev => [...prev, ...triggeredAlarms]);
     }
   };
 
-  const calculateDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371;
-    const dLat = deg2rad(lat2 - lat1);
-    const dLon = deg2rad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c * 1000; // Metre cinsinden mesafe
-  };
+  const playSoundPreview = async (soundValue) => {
+    if (playingSound) {
+      await playingSound.stopAsync();
+      await playingSound.unloadAsync();
+    }
 
-  const deg2rad = (deg) => deg * (Math.PI / 180);
+    const soundFiles = {
+      'flex.mp3': require('../assets/flex.mp3'),
+      'biohazard.mp3': require('../assets/biohazard.mp3'),
+      'ringtone.mp3': require('../assets/ringtone.mp3'),
+      'attack.mp3': require('../assets/attack.mp3'),
+      'summertime.mp3': require('../assets/summertime.mp3'),
+      'cosmic.mp3': require('../assets/cosmic.mp3'),
+      'summer.mp3': require('../assets/summer.mp3'),
+    };
 
-  const playAlarm = async () => {
     try {
-      // Önceki alarm sesi varsa durdur
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
-      }
-
-      const { sound } = await Audio.Sound.createAsync(
-        require('./assets/alarm.mp3'),
-        { isLooping: true } // Alarm duruncaya kadar çalsın
-      );
-      soundRef.current = sound;
+      const { sound } = await Audio.Sound.createAsync(soundFiles[soundValue]);
+      setPlayingSound(sound);
       await sound.playAsync();
+      setTimeout(async () => {
+        await sound.stopAsync();
+        await sound.unloadAsync();
+        setPlayingSound(null);
+      }, 5000);
     } catch (error) {
-      console.error('Alarm çalma hatası:', error);
-      Alert.alert('Hata', 'Alarm sesi çalınamadı.');
+      console.error('Error playing sound preview:', error);
+      Alert.alert('Error', 'Could not play sound preview.');
     }
   };
 
-  const stopAlarm = async () => {
-    if (soundRef.current) {
-      await soundRef.current.stopAsync();
+  const stopSoundPreview = async () => {
+    if (playingSound) {
+      try {
+        await playingSound.stopAsync();
+        await playingSound.unloadAsync();
+      } catch (error) {
+        console.error('Error stopping sound preview:', error);
+      } finally {
+        setPlayingSound(null);
+      }
     }
   };
 
-  const saveAlarm = () => {
-    if (alarmTitle.trim() === '') {
-      Alert.alert('Uyarı', 'Lütfen bir alarm başlığı girin.');
+  const saveAlarm = async () => {
+    if (!alarmTitle) {
+      Alert.alert('Error', 'Please enter an alarm name');
+      return;
+    }
+    if (!selectedLocation && !currentLocation) {
+      Alert.alert('Error', 'Please select a location');
       return;
     }
 
-    if (!selectedLocation) {
-      Alert.alert('Uyarı', 'Lütfen haritadan bir konum seçin.');
-      return;
-    }
+    const newAlarm = {
+      id: editAlarm?.id || Date.now().toString(),
+      name: alarmTitle,
+      time: selectedTime.toISOString(),
+      timeBased: isTimeBased,
+      latitude: selectedLocation?.latitude || currentLocation.latitude,
+      longitude: selectedLocation?.longitude || currentLocation.longitude,
+      radius,
+      sound: selectedSound,
+      active: true,
+    };
 
-    if (editMode && editAlarmId) {
-      // Mevcut alarmı güncelle
-      setAlarms(alarms.map(alarm => 
-        alarm.id === editAlarmId ? {
-          ...alarm,
-          name: alarmTitle,
-          time: selectedTime.toISOString(),
-          timeEnabled: isTimeEnabled,
-          latitude: selectedLocation.latitude,
-          longitude: selectedLocation.longitude,
-          radius: proximityRadius,
-        } : alarm
-      ));
-    } else {
-      // Yeni alarm ekle
-      const newAlarm = {
-        id: Math.random().toString(),
-        name: alarmTitle,
-        time: selectedTime.toISOString(),
-        timeEnabled: isTimeEnabled,
-        latitude: selectedLocation.latitude,
-        longitude: selectedLocation.longitude,
-        radius: proximityRadius,
-        oneTime: false, // Tek seferlik mi? (varsayılan: hayır)
-        createdAt: new Date().toISOString()
-      };
-
-      setAlarms([...alarms, newAlarm]);
-    }
-
-    resetModalState();
+    const updatedAlarms = editAlarm
+      ? alarms.map(a => a.id === editAlarm.id ? newAlarm : a)
+      : [...alarms, newAlarm];
+    
+    setAlarms(updatedAlarms);
+    navigation.setParams({ alarms: updatedAlarms });
+    await stopSoundPreview();
+    await resetModal();
   };
 
-  const resetModalState = () => {
+  const resetModal = async () => {
+    await stopSoundPreview();
     setModalVisible(false);
     setAlarmTitle('');
     setSelectedTime(new Date());
-    setIsTimeEnabled(true);
-    setProximityRadius(100);
-    setEditMode(false);
-    setEditAlarmId(null);
+    setTempTime(new Date());
+    setIsTimeBased(false);
+    setRadius(100);
+    setSelectedSound('flex.mp3');
+    setEditAlarm(null);
+    setSelectedLocation(null);
+    Keyboard.dismiss();
   };
 
-  const editAlarm = (alarm) => {
-    setAlarmTitle(alarm.name);
-    setSelectedTime(new Date(alarm.time));
-    setIsTimeEnabled(alarm.timeEnabled);
-    setSelectedLocation({
-      latitude: alarm.latitude,
-      longitude: alarm.longitude
-    });
-    setProximityRadius(alarm.radius || 100);
-    setEditMode(true);
-    setEditAlarmId(alarm.id);
+  const deleteAlarm = async (id) => {
+    const updatedAlarms = alarms.filter(alarm => alarm.id !== id);
+    setAlarms(updatedAlarms);
+    await AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(updatedAlarms));
+    navigation.setParams({ alarms: updatedAlarms });
+  };
+
+  const toggleAlarmActive = async (id) => {
+    const updatedAlarms = alarms.map(alarm =>
+      alarm.id === id ? { ...alarm, active: !alarm.active } : alarm
+    );
+    setAlarms(updatedAlarms);
+    await AsyncStorage.setItem(ALARMS_STORAGE_KEY, JSON.stringify(updatedAlarms));
+    navigation.setParams({ alarms: updatedAlarms });
+  };
+
+  const centerMap = () => {
+    if (currentLocation) {
+      mapRef.current.animateToRegion({
+        ...currentLocation,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      }, 1000);
+    }
+  };
+
+  const handleMapPress = (e) => {
+    const coords = e.nativeEvent.coordinate;
+    setSelectedLocation(coords);
     setModalVisible(true);
-    
-    // Haritayı alarm konumuna odakla
-    mapRef.current.animateToRegion({
-      latitude: alarm.latitude,
-      longitude: alarm.longitude,
-      latitudeDelta: 0.01,
-      longitudeDelta: 0.01,
-    }, 1000);
   };
 
-  const deleteAlarm = (alarmId) => {
-    // Aktif alarmlardan çıkar
-    if (activeAlarms.includes(alarmId)) {
-      setActiveAlarms(prev => prev.filter(id => id !== alarmId));
-    }
-    // Alarmlar listesinden çıkar
-    setAlarms(alarms.filter(alarm => alarm.id !== alarmId));
-  };
-
-  const centerToUserLocation = async () => {
-    if (!currentLocation) return;
-    
-    mapRef.current.animateToRegion({
-      ...currentLocation,
-      latitudeDelta: 0.01,
-      longitudeDelta: 0.01,
-    }, 1000);
-  };
-
-  const handleTimePickerShow = () => {
+  const handleTimeChange = (event, date) => {
     if (Platform.OS === 'android') {
-      setAndroidTimePickerMode(true);
-    } else {
-      // iOS için
-      setShowTimePicker(true);
-    }
-  };
-
-  const handleTimeChange = (event, selectedDate) => {
-    if (Platform.OS === 'android') {
-      setAndroidTimePickerMode(false);
-    } else {
       setShowTimePicker(false);
-    }
-    
-    if (selectedDate) {
-      setSelectedTime(selectedDate);
+      if (date) setSelectedTime(date);
+    } else if (date) {
+      setTempTime(date);
     }
   };
 
-  const renderRightActions = (progress, dragX, alarm) => (
-    <View style={styles.actionButtons}>
-      <TouchableOpacity
-        style={[styles.actionButton, styles.editButton]}
-        onPress={() => editAlarm(alarm)}
-      >
-        <Ionicons name="create-outline" size={20} color="white" />
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={[styles.actionButton, styles.deleteButton]}
-        onPress={() => 
-          Alert.alert(
-            'Onay', 
-            `${alarm.name} alarmını silmek istediğinizden emin misiniz?`,
-            [
-              {text: 'İptal', style: 'cancel'},
-              {text: 'Sil', style: 'destructive', onPress: () => deleteAlarm(alarm.id)}
-            ]
-          )
-        }
-      >
-        <Ionicons name="trash-outline" size={20} color="white" />
-      </TouchableOpacity>
-    </View>
-  );
+  const confirmTime = () => {
+    setSelectedTime(tempTime);
+    setShowTimePicker(false);
+  };
+
+  const formatTime = (date) => {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
 
   const renderAlarmItem = ({ item }) => (
-    <Swipeable
-      renderRightActions={(progress, dragX) => 
-        renderRightActions(progress, dragX, item)
-      }
-    >
-      <TouchableOpacity 
-        style={[
-          styles.alarmItem, 
-          activeAlarms.includes(item.id) && styles.activeAlarm
-        ]}
-        onPress={() => {
-          // Alarm konumuna odaklan
-          mapRef.current.animateToRegion({
+    <Swipeable renderRightActions={() => (
+      <View style={styles.swipeActions}>
+        <TouchableOpacity
+          style={styles.editBtn}
+          onPress={() => {
+            setEditAlarm(item);
+            setAlarmTitle(item.name);
+            setSelectedTime(new Date(item.time));
+            setTempTime(new Date(item.time));
+            setIsTimeBased(item.timeBased);
+            setRadius(item.radius);
+            setSelectedSound(item.sound);
+            setSelectedLocation({ latitude: item.latitude, longitude: item.longitude });
+            setModalVisible(true);
+          }}
+        >
+          <Ionicons name="pencil" size={20} color="#FFF" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.deleteBtn}
+          onPress={() => Alert.alert('Confirm', 'Delete this alarm?', [
+            { text: 'Cancel' },
+            { text: 'Delete', onPress: () => deleteAlarm(item.id) },
+          ])}
+        >
+          <Ionicons name="trash" size={20} color="#FFF" />
+        </TouchableOpacity>
+      </View>
+    )}>
+      <View style={[styles.alarmItem, !item.active && styles.inactiveAlarm]}>
+        <TouchableOpacity
+          style={styles.alarmContent}
+          onPress={() => mapRef.current.animateToRegion({
             latitude: item.latitude,
             longitude: item.longitude,
             latitudeDelta: 0.01,
             longitudeDelta: 0.01,
-          }, 1000);
-        }}
-      >
-        <Text style={styles.alarmTitle}>{item.name}</Text>
-        <View style={styles.alarmInfoContainer}>
-          <View style={styles.alarmTypeContainer}>
-            <Ionicons 
-              name={item.timeEnabled ? "time-outline" : "location-outline"} 
-              size={16} 
-              color="#666" 
-            />
-            <Text style={styles.alarmDetails}>
-              {item.timeEnabled ? 
-                new Date(item.time).toLocaleTimeString('tr-TR', {
-                  hour: '2-digit',
-                  minute: '2-digit'
-                }) : 'Konum alarmı'
-              }
-            </Text>
+          }, 1000)}
+        >
+          <View style={styles.alarmTextContainer}>
+            <Text style={[styles.alarmName, !item.active && styles.inactiveText]}>{item.name}</Text>
+            <View style={styles.alarmDetails}>
+              <Ionicons
+                name={item.timeBased ? "time-outline" : "location-outline"}
+                size={16}
+                color={item.active ? "#64748b" : "#94a3b8"}
+              />
+              <Text style={[styles.alarmDetail, !item.active && styles.inactiveText]}>
+                {item.timeBased
+                  ? formatTime(new Date(item.time))
+                  : `${item.radius}m radius`}
+              </Text>
+            </View>
           </View>
-          <View style={styles.alarmTypeContainer}>
-            <Ionicons name="navigate-outline" size={16} color="#666" />
-            <Text style={styles.alarmDetails}>
-              {item.radius || 100}m yarıçap
-            </Text>
-          </View>
-        </View>
-      </TouchableOpacity>
+        </TouchableOpacity>
+        <Switch
+          value={item.active}
+          onValueChange={() => toggleAlarmActive(item.id)}
+          trackColor={{ false: '#e2e8f0', true: '#60a5fa' }}
+          thumbColor={item.active ? '#FFF' : '#FFF'}
+          style={{ transform: [{ scale: 1.5 }] }} // Switch boyutu büyütüldü
+        />
+      </View>
     </Swipeable>
   );
 
-  // Alarmları temizleme fonksiyonu (geliştirici için)
-  const clearAllAlarms = async () => {
-    try {
-      await AsyncStorage.removeItem(ALARMS_STORAGE_KEY);
-      setAlarms([]);
-      Alert.alert('Başarılı', 'Tüm alarmlar silindi.');
-    } catch (error) {
-      console.error('Alarmlar silinirken hata oluştu:', error);
-      Alert.alert('Hata', 'Alarmlar silinemedi.');
-    }
-  };
-
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        <Text style={styles.loadingText}>Konum bilgisi alınıyor...</Text>
+      <View style={styles.loading}>
+        <ActivityIndicator size="large" color="#60a5fa" />
+        <Text style={styles.loadingText}>Loading location...</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      {initialRegion && (
-        <MapView
-          ref={mapRef}
-          style={styles.map}
-          initialRegion={initialRegion}
-          onPress={(e) => setSelectedLocation(e.nativeEvent.coordinate)}
-          showsUserLocation
-          showsMyLocationButton={false}
-        >
-          {alarms.map(alarm => (
-            <React.Fragment key={alarm.id}>
-              <Marker 
-                coordinate={{
-                  latitude: alarm.latitude,
-                  longitude: alarm.longitude
-                }}
-                title={alarm.name}
-                pinColor={activeAlarms.includes(alarm.id) ? "red" : "orange"}
-              />
-              <Circle 
-                center={{
-                  latitude: alarm.latitude,
-                  longitude: alarm.longitude
-                }}
-                radius={alarm.radius || 100}
-                strokeWidth={1}
-                strokeColor="rgba(0, 122, 255, 0.5)"
-                fillColor="rgba(0, 122, 255, 0.1)"
-              />
-            </React.Fragment>
-          ))}
-          
-          {modalVisible && selectedLocation && (
-            <>
-              <Marker coordinate={selectedLocation} pinColor="green" />
-              <Circle 
-                center={selectedLocation}
-                radius={proximityRadius}
-                strokeWidth={1}
-                strokeColor="rgba(50, 205, 50, 0.5)"
-                fillColor="rgba(50, 205, 50, 0.1)"
-              />
-            </>
-          )}
-        </MapView>
-      )}
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        initialRegion={initialRegion}
+        showsUserLocation
+        onPress={handleMapPress}
+        showsMyLocationButton={false}
+      >
+        {alarms.map(alarm => (
+          <React.Fragment key={alarm.id}>
+            <Marker
+              coordinate={{ latitude: alarm.latitude, longitude: alarm.longitude }}
+              title={alarm.name}
+              pinColor={alarm.active ? "#2563eb" : "#94a3b8"}
+            />
+            <Circle
+              center={{ latitude: alarm.latitude, longitude: alarm.longitude }}
+              radius={alarm.radius}
+              strokeColor={alarm.active ? "rgba(96, 165, 250, 0.6)" : "rgba(148, 163, 184, 0.6)"}
+              fillColor={alarm.active ? "rgba(96, 165, 250, 0.2)" : "rgba(148, 163, 184, 0.2)"}
+            />
+          </React.Fragment>
+        ))}
+        {selectedLocation && (
+          <>
+            <Marker
+              coordinate={selectedLocation}
+              pinColor="#60a5fa"
+              draggable
+              onDragEnd={(e) => setSelectedLocation(e.nativeEvent.coordinate)}
+            />
+            <Circle
+              center={selectedLocation}
+              radius={radius}
+              strokeColor="rgba(96, 165, 250, 0.6)"
+              fillColor="rgba(96, 165, 250, 0.2)"
+            />
+          </>
+        )}
+      </MapView>
 
       <View style={styles.mapControls}>
-        <TouchableOpacity 
-          style={styles.controlButton}
-          onPress={centerToUserLocation}
+        <TouchableOpacity style={styles.controlBtn} onPress={centerMap}>
+          <Ionicons name="locate" size={24} color="#FFF" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.controlBtn}
+          onPress={() => {
+            setSelectedLocation(null);
+            setModalVisible(true);
+          }}
         >
-          <Ionicons name="locate" size={24} color="white" />
+          <Ionicons name="add" size={24} color="#FFF" />
         </TouchableOpacity>
       </View>
 
-      <View style={styles.contentContainer}>
-        <View style={styles.headerContainer}>
-          <Text style={styles.headerTitle}>Alarmlarım</Text>
-          <TouchableOpacity
-            style={styles.addButton}
-            onPress={() => {
-              setSelectedLocation(currentLocation);
-              setModalVisible(true);
-            }}
-          >
-            <Ionicons name="add" size={24} color="white" />
-          </TouchableOpacity>
-        </View>
-
-        {alarms.length === 0 ? (
-          <View style={styles.emptyStateContainer}>
-            <Ionicons name="alarm-outline" size={50} color="#ccc" />
-            <Text style={styles.emptyStateText}>Henüz alarm eklenmedi</Text>
-            <Text style={styles.emptyStateSubText}>
-              Yeni bir konum alarmı eklemek için sağ üstteki + butonuna basın
-            </Text>
-          </View>
-        ) : (
-          <FlatList
-            data={alarms}
-            keyExtractor={(item) => item.id}
-            renderItem={renderAlarmItem}
-            style={styles.alarmList}
-          />
-        )}
+      <View style={styles.alarmContainer}>
+        <Text style={styles.headerText}>My Alarms</Text>
+        <FlatList
+          data={alarms}
+          renderItem={renderAlarmItem}
+          keyExtractor={item => item.id}
+          ListEmptyComponent={() => (
+            <View style={styles.emptyState}>
+              <Ionicons name="alarm-outline" size={48} color="#64748b" />
+              <Text style={styles.emptyText}>No alarms yet</Text>
+              <Text style={styles.emptySubText}>Tap anywhere on the map or use + to add an alarm</Text>
+            </View>
+          )}
+          contentContainerStyle={styles.alarmListContent}
+        />
       </View>
 
-      <Modal
-        visible={modalVisible}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => {
-          resetModalState();
-        }}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+      <Modal visible={modalVisible} animationType="none" transparent>
+        <View style={styles.modalContainer}>
+          <Animated.View
+            style={[
+              styles.modalContent,
+              { transform: [{ translateY: modalOffset }] },
+            ]}
+          >
             <Text style={styles.modalTitle}>
-              {editMode ? 'Alarmı Düzenle' : 'Yeni Alarm'}
+              {editAlarm ? 'Edit Alarm' : 'New Alarm'}
             </Text>
 
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>Alarm Adı</Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Name</Text>
               <TextInput
                 style={styles.input}
                 value={alarmTitle}
                 onChangeText={setAlarmTitle}
-                placeholder="Alarm adını girin"
+                placeholder="Enter alarm name"
+                placeholderTextColor="#64748b"
+                autoFocus
               />
             </View>
 
-            <View style={styles.switchContainer}>
-              <Text style={styles.inputLabel}>Zamanlı Alarm</Text>
-              <Switch
-                value={isTimeEnabled}
-                onValueChange={setIsTimeEnabled}
-              />
-            </View>
-
-            {isTimeEnabled && (
-              <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Alarm Saati</Text>
+            <View style={styles.inputGroup}>
+              <View style={styles.switchRow}>
+                <Text style={styles.inputLabel}>Time-based</Text>
+                <Switch
+                  value={isTimeBased}
+                  onValueChange={setIsTimeBased}
+                  trackColor={{ false: '#e2e8f0', true: '#60a5fa' }}
+                  thumbColor={isTimeBased ? '#FFF' : '#FFF'}
+                />
+              </View>
+              {isTimeBased && (
                 <TouchableOpacity
-                  style={styles.timeButton}
-                  onPress={handleTimePickerShow}
+                  style={styles.timeBtn}
+                  onPress={() => setShowTimePicker(true)}
                 >
-                  <Text style={styles.timeButtonText}>
-                    {selectedTime.toLocaleTimeString('tr-TR', {
-                      hour: '2-digit',
-                      minute: '2-digit'
-                    })}
+                  <Text style={styles.timeText}>
+                    {formatTime(selectedTime)}
                   </Text>
                 </TouchableOpacity>
-              </View>
-            )}
+              )}
+              {showTimePicker && (
+                <View style={styles.timePickerContainer}>
+                  <DateTimePicker
+                    value={tempTime}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={handleTimeChange}
+                    textColor="#1e3a8a"
+                    accentColor="#60a5fa"
+                    style={styles.timePicker}
+                  />
+                  {Platform.OS === 'ios' && (
+                    <View style={styles.timePickerButtons}>
+                      <TouchableOpacity
+                        style={styles.timePickerBtn}
+                        onPress={() => setShowTimePicker(false)}
+                      >
+                        <Text style={styles.timePickerBtnText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.timePickerBtn, styles.timePickerConfirmBtn]}
+                        onPress={confirmTime}
+                      >
+                        <Text style={styles.timePickerBtnText}>Confirm</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              )}
+            </View>
 
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>Yakınlık Mesafesi</Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Radius</Text>
               <View style={styles.radiusOptions}>
-                {[50, 100, 200, 500].map(radius => (
+                {[50, 100, 200, 500].map(r => (
                   <TouchableOpacity
-                    key={radius}
-                    style={[
-                      styles.radiusOption,
-                      proximityRadius === radius && styles.selectedRadiusOption
-                    ]}
-                    onPress={() => setProximityRadius(radius)}
+                    key={r}
+                    style={[styles.radiusBtn, radius === r && styles.radiusBtnActive]}
+                    onPress={() => setRadius(r)}
                   >
-                    <Text style={[
-                      styles.radiusOptionText,
-                      proximityRadius === radius && styles.selectedRadiusOptionText
-                    ]}>
-                      {radius}m
+                    <Text style={[styles.radiusText, radius === r && styles.radiusTextActive]}>
+                      {r}m
                     </Text>
                   </TouchableOpacity>
                 ))}
               </View>
             </View>
 
-            <View style={styles.locationNote}>
-              <Ionicons name="information-circle-outline" size={18} color="#666" />
-              <Text style={styles.locationNoteText}>
-                Konumu değiştirmek için haritada istediğiniz noktaya dokunun
-              </Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Alarm Sound</Text>
+              <View style={styles.soundOptionsContainer}>
+                <FlatList
+                  data={ALARM_SOUNDS}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={[
+                        styles.soundOption,
+                        selectedSound === item.value && styles.soundOptionSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedSound(item.value);
+                        playSoundPreview(item.value);
+                      }}
+                    >
+                      <Text style={[
+                        styles.soundOptionText,
+                        selectedSound === item.value && styles.soundOptionTextSelected,
+                      ]}>
+                        {item.label}
+                      </Text>
+                      {selectedSound === item.value && (
+                        <Ionicons name="checkmark" size={16} color="#FFF" />
+                      )}
+                    </TouchableOpacity>
+                  )}
+                  keyExtractor={item => item.value}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                />
+              </View>
             </View>
 
-            <View style={styles.buttonContainer}>
-              <TouchableOpacity
-                style={[styles.button, styles.saveButton]}
-                onPress={saveAlarm}
-              >
-                <Text style={styles.buttonText}>Kaydet</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.saveBtn} onPress={saveAlarm}>
+                <Text style={styles.btnText}>Save</Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.button, styles.cancelButton]}
-                onPress={() => resetModalState()}
-              >
-                <Text style={[styles.buttonText, styles.cancelButtonText]}>
-                  İptal
-                </Text>
+              <TouchableOpacity style={styles.cancelBtn} onPress={resetModal}>
+                <Text style={styles.btnText}>Cancel</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </Animated.View>
         </View>
       </Modal>
-
-      {/* iOS için saat seçici */}
-      {Platform.OS === 'ios' && showTimePicker && (
-        <DateTimePicker
-          value={selectedTime}
-          mode="time"
-          is24Hour={true}
-          display="spinner"
-          onChange={handleTimeChange}
-        />
-      )}
-
-      {/* Android için saat seçici */}
-      {Platform.OS === 'android' && androidTimePickerMode && (
-        <DateTimePicker
-          value={selectedTime}
-          mode="time"
-          is24Hour={true}
-          display="default" 
-          onChange={handleTimeChange}
-        />
-      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: '#555',
-  },
-  map: {
-    flex: 1,
-  },
-  mapControls: {
-    position: 'absolute',
-    right: 16,
-    top: 50,
-  },
-  controlButton: {
-    backgroundColor: '#007AFF',
-    padding: 12,
-    borderRadius: 30,
-    elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    marginBottom: 10,
-  },
-  contentContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'white',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: '50%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 10,
-  },
-  headerContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  addButton: {
-    backgroundColor: '#007AFF',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyStateContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  emptyStateText: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#555',
-    marginTop: 10,
-  },
-  emptyStateSubText: {
-    fontSize: 14,
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 5,
-  },
-  alarmList: {
-    marginTop: 10,
-  },
-  alarmItem: {
-    backgroundColor: '#f8f9fa',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 10,
-    borderLeftWidth: 4,
-    borderLeftColor: '#007AFF',
-  },
-  activeAlarm: {
-    borderLeftColor: '#FF3B30',
-    backgroundColor: '#FFF5F5',
-  },
-  alarmTitle: {
-    fontSize: 16,
-    fontWeight: '500',
-    marginBottom: 5,
-  },
-  alarmInfoContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  alarmTypeContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  alarmDetails: {
-    fontSize: 12,
-    color: '#666',
-    marginLeft: 5,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-  },
-  actionButton: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: 50,
-    height: '90%',
-    marginVertical: 5,
-    marginRight: 5,
-    borderRadius: 10,
-  },
-  editButton: {
-    backgroundColor: '#007AFF',
-  },
-  deleteButton: {
-    backgroundColor: '#FF3B30',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 20,
-    width: '90%',
-    maxWidth: 400,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  switchContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 16,
-    marginBottom: 8,
-    color: '#333',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 16,
-  },
-  timeButton: {
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  timeButtonText: {
-    fontSize: 16,
-    color: '#333',
-  },
-  radiusOptions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  radiusOption: {
-    flex: 1,
-    padding: 10,
-    borderRadius: 10,
-    backgroundColor: '#f8f9fa',
-    alignItems: 'center',
-    marginHorizontal: 5,
-  },
-  selectedRadiusOption: {
-    backgroundColor: '#007AFF',
-  },
-  radiusOptionText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  selectedRadiusOptionText: {
-    color: 'white',
-  },
-  locationNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 10,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 10,
-    marginBottom: 20,
-  },
-  locationNoteText: {
-    fontSize: 12,
-    color: '#666',
-    marginLeft: 5,
-    flex: 1,
-  },
-  buttonContainer: {
-    flexDirection: 'column',
-    gap: 10,
-  },
-  button: {
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  saveButton: {
-    backgroundColor: '#007AFF',
-  },
-  cancelButton: {
-    backgroundColor: '#f8f9fa',
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  cancelButtonText: {
-    color: '#333',
-  },
+  container: { flex: 1, backgroundColor: '#f0f9ff' },
+  map: { flex: 1 },
+  mapControls: { position: 'absolute', top: 50, right: 10, gap: 12 },
+  controlBtn: { backgroundColor: '#60a5fa', padding: 12, borderRadius: 30, elevation: 4, shadowColor: '#2563eb', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4 },
+  alarmContainer: { flex: 1, backgroundColor: '#f0f9ff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, elevation: 8 },
+  headerText: { fontSize: 24, fontWeight: '800', color: '#1e3a8a', marginBottom: 12 },
+  alarmListContent: { paddingBottom: 16 },
+  alarmItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', marginVertical: 4, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(147,197,253,0.3)', elevation: 2 },
+  inactiveAlarm: { backgroundColor: '#f1f5f9', borderColor: 'rgba(148, 163, 184, 0.3)' },
+  alarmContent: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  alarmTextContainer: { flex: 1 },
+  alarmName: { fontSize: 16, fontWeight: '700', color: '#1e3a8a' },
+  inactiveText: { color: '#94a3b8' },
+  alarmDetails: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+  alarmDetail: { fontSize: 12, color: '#2563eb', marginLeft: 4, fontStyle: 'italic' },
+  swipeActions: { flexDirection: 'row', marginVertical: 4 },
+  editBtn: { backgroundColor: '#2563eb', padding: 16, justifyContent: 'center' },
+  deleteBtn: { backgroundColor: '#ef4444', padding: 16, justifyContent: 'center' },
+  emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
+  emptyText: { fontSize: 18, fontWeight: '700', color: '#1e3a8a', marginTop: 16 },
+  emptySubText: { fontSize: 14, color: '#64748b', textAlign: 'center', marginTop: 8, fontStyle: 'italic' },
+  modalContainer: { flex: 1, justifyContent: 'center', backgroundColor: 'rgba(30, 58, 138, 0.5)' },
+  modalContent: { backgroundColor: '#f0f9ff', marginHorizontal: 24, padding: 16, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(147,197,253,0.5)', elevation: 4 },
+  modalTitle: { fontSize: 24, fontWeight: '800', color: '#1e3a8a', marginBottom: 20, textAlign: 'center' },
+  inputGroup: { marginBottom: 16 },
+  inputLabel: { fontSize: 16, color: '#2563eb', marginBottom: 8, fontWeight: '600', fontStyle: 'italic' },
+  input: { borderWidth: 1, borderColor: '#93c5fd', borderRadius: 8, padding: 12, fontSize: 16, backgroundColor: '#fff', color: '#1e3a8a' },
+  switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  timeBtn: { padding: 12, backgroundColor: '#e2e8f0', borderRadius: 8, marginTop: 8, width: '100%', alignItems: 'center' },
+  timeText: { fontSize: 16, color: '#1e3a8a', fontWeight: '500' },
+  timePickerContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 10, width: '100%' },
+  timePicker: { backgroundColor: '#f0f9ff', width: 200 },
+  timePickerButtons: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 10 },
+  timePickerBtn: { backgroundColor: '#ef4444', padding: 10, borderRadius: 8, flex: 0.48, alignItems: 'center' },
+  timePickerConfirmBtn: { backgroundColor: '#60a5fa' },
+  timePickerBtnText: { color: '#fff', fontSize: 14, fontWeight: '500' },
+  radiusOptions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  radiusBtn: { paddingVertical: 8, paddingHorizontal: 16, backgroundColor: '#e2e8f0', borderRadius: 20 },
+  radiusBtnActive: { backgroundColor: '#60a5fa' },
+  radiusText: { fontSize: 14, color: '#1e3a8a' },
+  radiusTextActive: { color: '#fff', fontWeight: '500' },
+  soundOptionsContainer: { marginTop: 8, maxHeight: 50 },
+  soundOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#fff', borderRadius: 20, marginRight: 8, borderWidth: 1, borderColor: '#93c5fd' },
+  soundOptionSelected: { backgroundColor: '#60a5fa', borderColor: '#60a5fa' },
+  soundOptionText: { color: '#1e3a8a', fontSize: 14 },
+  soundOptionTextSelected: { color: '#fff', fontWeight: '500' },
+  modalButtons: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  saveBtn: { backgroundColor: '#60a5fa', padding: 14, borderRadius: 8, flex: 1, alignItems: 'center' },
+  cancelBtn: { backgroundColor: '#ef4444', padding: 14, borderRadius: 8, flex: 1, alignItems: 'center' },
+  btnText: { color: '#fff', fontSize: 16, fontWeight: '500' },
+  loading: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f9ff' },
+  loadingText: { marginTop: 16, fontSize: 16, color: '#64748b' },
 });
 
-export default AlarmApp;
+export default LocationAlarm;

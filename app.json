@@ -13,16 +13,60 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": ["location", "fetch", "audio"],
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs location access to trigger alarms in the background.",
+        "NSLocationWhenInUseUsageDescription": "This app needs location access to set location-based alarms."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      }
+      },
+      "package": "com.ferhat7272.RemiGo",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "WAKE_LOCK",
+        "SCHEDULE_EXACT_ALARM"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#60a5fa"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow RemiGo to use your location for alarms.",
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
+    ],
+    "extra": {
+      "firebaseApiKey": "AIzaSyXXXXX",
+      "firebaseAuthDomain": "remigo-a027b.firebaseapp.com",
+      "firebaseProjectId": "remigo-a027b",
+      "firebaseStorageBucket": "remigo-a027b.appspot.com",
+      "firebaseMessagingSenderId": "903349572093",
+      "firebaseAppId": "1:903349572093:web:ba0cc5aa0b2e45e7b6c994",
+      "firebaseMeasurementId": "G-6QP46VCGP8",
+      "eas": {
+        "projectId": "177227ba-5965-4629-bb88-c8fb964910b1"
+      }
     }
   }
 }
